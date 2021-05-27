@@ -2,6 +2,7 @@ use std::thread;
 use std::net::{TcpListener, TcpStream, Shutdown};
 use std::io::{Read, Write};
 use super::{ConnectionStatus, InitState};
+use super::game;
 
 pub fn make_ip(ip1: String, ip2: String, ip3: String, ip4: String) -> String {
     [ip1, ip2, ip3, ip4].join(".")
@@ -19,7 +20,8 @@ pub fn server_main(ip_address: String, port: String, state: &mut InitState) {
                 state.connection_status = ConnectionStatus::Connected;
                 println!("New connection: {}", stream.peer_addr().unwrap());
                 thread::spawn(move|| {
-                    println!("Connection succeeded")
+                    println!("Connection succeeded");
+                    let _game_result = game::start_game();
                 });
             },
             Err(e) => {

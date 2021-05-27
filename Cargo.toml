@@ -9,3 +9,5 @@ edition = "2018"
 [dependencies]
 ggez = "0.5.1"
 druid = "0.7.0"
+getrandom = "0.2.3"
+oorandom = "11.1.3"

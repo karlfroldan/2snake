@@ -1,4 +1,5 @@
 mod connect;
+mod game;
 
 use connect::{server_main, client_main, make_ip};
 
