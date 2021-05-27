@@ -1,3 +1,5 @@
+extern crate byte_strings;
+
 mod connect;
 mod game;
 
@@ -38,11 +40,17 @@ fn build_ui() -> impl Widget<InitState> {
         .on_click(|_ctx, data: &mut InitState, _env| {
             // set the mode to server
             (*data).mode = Mode::Server;
+
+            (*data).ip1 = "0".into();
+            (*data).ip4 = "0".into();
         });
     let client_btn = Button::new("Client")
         .on_click(|_ctx, data: &mut InitState, _env| {
             // Set the mode to client
             (*data).mode = Mode::Client;
+            // Set the IP Address
+            (*data).ip1 = "127".into();
+            (*data).ip4 = "1".into();
         });
     
     /* Some widgets for asking for the IP Address */
@@ -116,14 +124,23 @@ fn build_ui() -> impl Widget<InitState> {
     Align::centered(layout)
 }
 
-#[derive(Clone, PartialEq, Data)]
-enum Mode {
+#[derive(Clone, Copy, PartialEq, Data)]
+pub enum Mode {
     Client,
     Server,
 }
 
+impl Mode {
+    pub fn not(&self) -> Self {
+        match self {
+            Mode::Client => Mode::Server,
+            Mode::Server => Mode::Client,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Data)]
-enum ConnectionStatus {
+pub enum ConnectionStatus {
     NoAction,
     Connecting,
     Connected,

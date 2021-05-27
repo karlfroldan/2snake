@@ -8,7 +8,30 @@ use ggez::{event, graphics, Context, GameResult};
 use std::collections::LinkedList;
 use std::time::{Duration, Instant};
 
+use std::thread;
+use std::net::{TcpListener, TcpStream, Shutdown};
+use std::io::{Read, Write};
+
+use std::boxed::Box;
+
+use super::Mode;
+
+mod concat;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Player { One, Two, }
+
+impl Player {
+    pub fn not(&self) -> Self {
+        match self {
+            Player::One => Player::Two,
+            Player::Two => Player::One,
+        }
+    }
+}
+
 /* Set up some constants that will help us out later */
+const BUFFER_SIZE: usize = 8;
 // We choose to make a 30x20 game board
 const GRID_SIZE: (i16, i16) = (30, 20);
 // We define the pixel size of each tile
@@ -26,11 +49,15 @@ const UPDATES_PER_SECOND: f32 = 8.0;
 // corresponds to
 const MILLIS_PER_UPDATE: u64 = (1.0 / UPDATES_PER_SECOND * 1000.0) as u64;
 
-pub fn start_game() -> GameResult {
+pub fn start_game(stream: TcpStream, mode: Mode) -> GameResult {
+    let name = match mode {
+        Mode::Server => "Snake server",
+        Mode::Client => "Snake client",
+    };
     // Here we use a ContextBuilder to setup metadata about our game.
-    let (mut ctx, mut events_loop) = ggez::ContextBuilder::new("snake", "Karl")
+    let (mut ctx, mut events_loop) = ggez::ContextBuilder::new(name, "Karl")
         // Next we set up the window. 
-        .window_setup(ggez::conf::WindowSetup::default().title("Snake!"))
+        .window_setup(ggez::conf::WindowSetup::default().title(name))
         // Now we get to set the zize of the window which we use
         // our SCREEN_SIZE constant from earlier to help with
         .window_mode(ggez::conf::WindowMode::default().dimensions(SCREEN_SIZE.0, SCREEN_SIZE.1))
@@ -38,7 +65,7 @@ pub fn start_game() -> GameResult {
         // the message
         .build()?;
         // Next we create a new instance of our GameState struct, which implements EventHandler
-        let mut state = GameState::new();
+        let mut state = GameState::new(mode, stream);
         event::run(&mut ctx, &mut events_loop, &mut state)
 }
 
@@ -69,6 +96,31 @@ impl GridPosition {
     /// `GridPosition` more easily
     pub fn new(x: i16, y: i16) -> Self {
         GridPosition { x, y }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 4] {
+        let x_bytes = self.x.to_be_bytes();
+        let y_bytes = self.y.to_be_bytes();
+
+        concat::concat_i16_i16(&x_bytes, &y_bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8; 4]) -> GridPosition {
+        let mut x_bytes : [u8; 2] = [0; 2];
+        let mut y_bytes : [u8; 2] = [0; 2];
+
+        for i in 0..4 {
+            if i >= 2 {
+                y_bytes[i - 2] = bytes[i];
+            } else {
+                x_bytes[i] = bytes[i];
+            }
+        }
+
+        let x = i16::from_be_bytes(x_bytes);
+        let y = i16::from_be_bytes(y_bytes);
+
+        Self::new(x, y)
     }
 
     /// As well as a helper function that will give us a random 
@@ -111,6 +163,11 @@ impl From<GridPosition> for graphics::Rect {
             GRID_CELL_SIZE.1 as i32,
         )
     }
+
+    // fn to_be_bytes(&self) {
+    //     let x_bytes = self.x.to_be_bytes();
+    //     let y_bytes = self.y.to_be_bytes();
+    // }
 }
 
 /// And here, we implement `From` again to allow us to easily convert between 
@@ -124,7 +181,7 @@ impl From<(i16, i16)> for GridPosition {
 /// Next we create an enum that will represent all the possible
 /// directions that our snake could move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Direction {
+pub enum Direction {
     Up,
     Down,
     Left,
@@ -141,6 +198,25 @@ impl Direction {
             Direction::Down  => Direction::Up,
             Direction::Left  => Direction::Right,
             Direction::Right => Direction::Left,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 1] {
+        match *self {
+            Direction::Up    => [0],
+            Direction::Down  => [1],
+            Direction::Left  => [2],
+            Direction::Right => [3],
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8; 1]) -> Direction {
+        match *bytes {
+            [0] => Direction::Up,
+            [1] => Direction::Down,
+            [2] => Direction::Left,
+            [3] => Direction::Right,
+             _  => panic!("Error"),
         }
     }
 
@@ -182,6 +258,15 @@ struct Food {
 impl Food {
     pub fn new(pos: GridPosition) -> Self {
         Food { pos }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 4] {
+        self.pos.to_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8; 4]) -> Self {
+        let grid_pos = GridPosition::from_bytes(bytes);
+        Self::new(grid_pos)
     }
 
     /// We have a function that takes in `&mut ggez::Context` which we use with the
@@ -247,11 +332,30 @@ struct Snake {
     /// `update`. This is needed so a user can press two directions (left then up)
     /// before one `update` has happened. It sort of queues up key press input
     next_dir: Option<Direction>,
+    /// The color of the snake's head
+    head_color: graphics::Color,
+    /// The color of the snake's body
+    body_color: graphics::Color,
 }
 
 impl Snake {
-    pub fn new(pos: GridPosition) -> Self {
+    pub fn new(pos: GridPosition, player: Player) -> Self {
         let mut body = LinkedList::new();
+        let body_color: graphics::Color;
+        let head_color: graphics::Color;
+        // Set the colors
+        match player {
+            Player::One => {
+                head_color = [0.3, 0.3, 0.0, 1.0].into();
+                body_color = [1.0, 0.5, 0.0, 1.0].into();
+            },
+            Player::Two => {
+                head_color = [0.2, 0.3, 0.4, 1.0].into();
+                body_color = [0.3, 0.7, 0.2, 1.0].into();
+            }
+        }
+
+
         // our snake will initially have a head and one body segment,
         // and will be moving to the right.
         body.push_back(Segment::new((pos.x - 1, pos.y).into()));
@@ -262,6 +366,8 @@ impl Snake {
             body: body,
             ate: None,
             next_dir: None,
+            head_color,
+            body_color,
         }
     }
 
@@ -340,7 +446,8 @@ impl Snake {
                 ctx,
                 graphics::DrawMode::fill(),
                 seg.pos.into(),
-                [0.3, 0.3, 0.0, 1.0].into(),
+                self.body_color,
+                //[0.3, 0.3, 0.0, 1.0].into(),
             )?;
             graphics::draw(ctx, &rectangle, (ggez::mint::Point2 {x:0.0, y:0.0},))?;
         }
@@ -350,7 +457,8 @@ impl Snake {
             ctx,
             graphics::DrawMode::fill(),
             self.head.pos.into(),
-            [1.0, 0.5, 0.0, 1.0].into(),
+            self.head_color,
+            //[1.0, 0.5, 0.0, 1.0].into(),
         )?;
         graphics::draw(ctx, &rectangle, (ggez::mint::Point2 {x: 0.0, y: 0.0 },))?;
 
@@ -363,7 +471,9 @@ impl Snake {
 /// in our game
 struct GameState {
     /// We first need a snake
-    snake: Snake,
+    player1: Snake,
+    player2: Snake,
+    mode: Mode,
     /// A piece of food
     food: Food,
     /// Whether the game is over or not
@@ -373,28 +483,52 @@ struct GameState {
     /// and we track the last time we updated so that we can limit 
     /// our update rate
     last_update: Instant,
+    /// TCP Stream
+    stream: TcpStream,
 }
 
 impl GameState {
     /// Our new function will set up the initial state of our game.
-    pub fn new() -> Self {
+    pub fn new(mode: Mode, mut stream: TcpStream) -> Self {
         // First we put our snake a quarter of the way accross our grid in the x axis.
         // and half way down the y axis. This works well since we start out moving to the right
-        let snake_pos = (GRID_SIZE.0 / 4, GRID_SIZE.1 / 2).into();
+        let mod_pos = GRID_SIZE.1 / 4;
+        let snake_pos_2 = (GRID_SIZE.0 / 4, mod_pos + GRID_SIZE.1 / 2).into();
+        let snake_pos_1 = (GRID_SIZE.0 / 4, mod_pos).into();
         // and we seed ourRNG with the system RNG.
         let mut seed: [u8; 8] = [0; 8];
         getrandom::getrandom(&mut seed[..]).expect("Could not create RNG seed");
+
+        let food_pos;
         let mut rng = Rand32::new(u64::from_ne_bytes(seed));
-        // Then we choose a random place to put our food using the helper we made
-        // earlier
-        let food_pos = GridPosition::random(&mut rng, GRID_SIZE.0, GRID_SIZE.1);
+
+        match mode {
+            Mode::Server => {
+                let mut buffer = [0; BUFFER_SIZE];
+                food_pos = GridPosition::random(&mut rng, GRID_SIZE.0, GRID_SIZE.1);
+                // Send the initial food position to the client
+                buffer = concat::add_position(&mut buffer, &food_pos.to_bytes());
+                let _ = stream.write(&buffer).unwrap();
+            }
+            Mode::Client => {
+                /* Receive the initial food position */
+                let mut buffer = [0; BUFFER_SIZE];
+                let _ = stream.read_exact(&mut buffer).unwrap();
+                let pos = concat::read_position(&buffer);
+                let gp = GridPosition::from_bytes(&pos);
+                food_pos = gp;
+            }
+        }
 
         GameState {
-            snake: Snake::new(snake_pos),
+            player1: Snake::new(snake_pos_1, Player::One),
+            player2: Snake::new(snake_pos_2, Player::Two),
+            mode,
             food: Food::new(food_pos),
             gameover: false,
             rng,
             last_update: Instant::now(),
+            stream,
         }
     }
 }
@@ -409,6 +543,8 @@ impl event::EventHandler for GameState {
         // First we check to see if enough time has elapsed since our last update
         // based on the update rate so we defined at the top
         // if not, we do nothing and return early.
+        let mut buffer = [0; BUFFER_SIZE];
+
         if !(Instant::now() - self.last_update >= Duration::from_millis(MILLIS_PER_UPDATE)) {
             return Ok(());
         }
@@ -416,27 +552,90 @@ impl event::EventHandler for GameState {
         // Then we check to see if the game is over. If not, we'll update. If so,
         // we just do nothing.
         if !self.gameover {
-            // Here we do that actual updating of our game world. First, we tell the
-            // snake to update itself,
-            // passing in a reference to our piece of food.
-            self.snake.update(&self.food);
-            // Next we check if the snake ate anything as it updated.
-            if let Some(ate) = self.snake.ate {
-                // If it did, we want to know what it ate. 
-                match ate {
-                    // If it ate a piece of food, we randomly select a new position
-                    // for our piece of food and move it to this new position.
-                    Ate::Food => {
-                        let new_food_pos = 
-                            GridPosition::random(&mut self.rng, GRID_SIZE.0, GRID_SIZE.1);
-                        self.food.pos = new_food_pos;
+            match self.mode {
+                Mode::Server => {
+                    // Here we do that actual updating of our game world. First, we tell the
+                    // snake to update itself,
+                    // passing in a reference to our piece of food.
+                    self.player1.update(&self.food);
+                    self.player2.update(&self.food);
+                    // Next, we check if the snake ate anything as it updated.
+                    if let Some(ate) = self.player1.ate {
+                        match ate {
+                            Ate::Food => {
+                                let new_food_pos =
+                                    GridPosition::random(&mut self.rng, GRID_SIZE.0, GRID_SIZE.1);
+                                self.food.pos = new_food_pos;     
+                            }
+                            Ate::Itself => {
+                                self.gameover = true;
+                            }
+                        }
                     }
-                    // If it ate itself, we set our gameover state to true.
-                    Ate::Itself => {
-                        self.gameover = true;
+
+                    if let Some(ate) = self.player2.ate {
+                        match ate {
+                            Ate::Food => {
+                                let new_food_pos =
+                                    GridPosition::random(&mut self.rng, GRID_SIZE.0, GRID_SIZE.1);
+                                self.food.pos = new_food_pos;     
+                            }
+                            Ate::Itself => {
+                                self.gameover = true;
+                            }
+                        }
                     }
+
+                    // Then send the new food location to the client
+                    buffer = concat::add_position(&mut buffer, &self.food.pos.to_bytes());
+                    // we also send if the game is over
+                    buffer = concat::is_game_over(&mut buffer, self.gameover);
+                    // We also want to send the keystroke of player 1 to the client
+                    buffer = concat::write_directions(
+                        &mut buffer, 
+                        self.player1.dir, 
+                        self.player1.last_update_dir,
+                        self.player1.next_dir,
+                    );
+                    // Send it over to the client
+                    self.stream.write(&buffer[0..BUFFER_SIZE]).unwrap();
+
+                    // Read the buffer from the client
+                    self.stream.read_exact(&mut buffer).unwrap();
+                    // And now we read the actions of player2
+                    let (dir, last_update_dir, next_dir) = concat::read_directions(&buffer);
+                    self.player2.dir = dir;
+                    self.player2.last_update_dir = last_update_dir;
+                    self.player2.next_dir = next_dir;
+                },
+                Mode::Client => {
+                    // Client owns player2 so we update player 2 from client
+                    self.player2.update(&self.food);
+                    self.player1.update(&self.food);
+
+                    // We get the new position of the food.
+                    let _ = self.stream.read_exact(&mut buffer).unwrap();
+                    let pos = concat::read_position(&buffer);
+                    let gp = GridPosition::from_bytes(&pos);
+                    self.food.pos = gp;
+                    // Also, we read what player 1 did
+                    let (dir, last_update_dir, next_dir) = concat::read_directions(&buffer);
+                    self.player1.dir = dir;
+                    self.player1.last_update_dir = last_update_dir;
+                    self.player1.next_dir = next_dir;
+
+                    // We also have to encode the keypresses of player 2
+                    // and send them to the server
+                    buffer = concat::write_directions(
+                        &mut buffer,
+                        self.player2.dir,
+                        self.player2.last_update_dir,
+                        self.player2.next_dir,
+                    );
+
+                    self.stream.write(&buffer[0..BUFFER_SIZE]).unwrap();
                 }
-            }
+            } 
         }
         // If we updated, we set our last update to be now
         self.last_update = Instant::now();
@@ -448,7 +647,8 @@ impl event::EventHandler for GameState {
         // First we clear the screen to a nice (well, maybe pretty glaring ;)) green
         graphics::clear(ctx, [0.0, 1.0, 0.0, 1.0].into());
         // Then we tell the snake and the food to draw themselves.
-        self.snake.draw(ctx)?;
+        self.player1.draw(ctx)?;
+        self.player2.draw(ctx)?;
         self.food.draw(ctx)?;
         // Finally, we call graphics::present to cycle the gpu's framebuffer
         // and display the new frame we just drew.
@@ -471,15 +671,31 @@ impl event::EventHandler for GameState {
         if let Some(dir) = Direction::from_keycode(keycode) {
             // if it succeeds, we check if the new direction has already been set.
             // and make sure the new idrection is different then `snake.dir`
-            if self.snake.dir != self.snake.last_update_dir && dir.inverse() != self.snake.dir {
-                self.snake.next_dir = Some(dir);
-            } else if dir.inverse() != self.snake.last_update_dir {
-                // If no new direction has been set and the direction is not the inverse,
-                // of the last_update_dir, then set the snake's new direction to be
-                // the direction the user pressed.
-                self.snake.dir = dir;
+            match self.mode {
+                Mode::Server => {
+                    if self.player1.dir != self.player1.last_update_dir && dir.inverse() != self.player1.dir {
+                        self.player1.next_dir = Some(dir);
+                    } else if dir.inverse() != self.player1.last_update_dir {
+                        // If no new direction has been set and the direction is not the inverse,
+                        // of the last_update_dir, then set the snake's new direction to be
+                        // the direction the user pressed.
+                        self.player1.dir = dir;
+                        // Also, we send this to the client
+                        // let buffer = dir.to_bytes();
+                        // let _ = self.stream.write(&buffer).unwrap();
+                    }
+                }
+                Mode::Client => {
+                    if self.player2.dir != self.player2.last_update_dir && dir.inverse() != self.player2.dir {
+                        self.player2.next_dir = Some(dir);
+                    } else if dir.inverse() != self.player2.last_update_dir {
+                        // If no new direction has been set and the direction is not the inverse,
+                        // of the last_update_dir, then set the snake's new direction to be
+                        // the direction the user pressed.
+                        self.player2.dir = dir;
+                    }
+                }
             }
         }
     }
 }
-
