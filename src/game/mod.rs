@@ -485,6 +485,7 @@ struct GameState {
     last_update: Instant,
     /// TCP Stream
     stream: TcpStream,
+    update_nbr: u128,
 }
 
 impl GameState {
@@ -529,6 +530,7 @@ impl GameState {
             rng,
             last_update: Instant::now(),
             stream,
+            update_nbr: 0,
         }
     }
 }
@@ -558,7 +560,7 @@ impl event::EventHandler for GameState {
                     // snake to update itself,
                     // passing in a reference to our piece of food.
                     self.player1.update(&self.food);
-                    self.player2.update(&self.food);
+                    
                     // Next, we check if the snake ate anything as it updated.
                     if let Some(ate) = self.player1.ate {
                         match ate {
@@ -607,22 +609,27 @@ impl event::EventHandler for GameState {
                     self.player2.dir = dir;
                     self.player2.last_update_dir = last_update_dir;
                     self.player2.next_dir = next_dir;
+
+                    self.player2.update(&self.food);
                 },
                 Mode::Client => {
                     // Client owns player2 so we update player 2 from client
+                    
                     self.player2.update(&self.food);
-                    self.player1.update(&self.food);
 
                     // We get the new position of the food.
                     let _ = self.stream.read_exact(&mut buffer).unwrap();
                     let pos = concat::read_position(&buffer);
                     let gp = GridPosition::from_bytes(&pos);
-                    self.food.pos = gp;
+                    
                     // Also, we read what player 1 did
                     let (dir, last_update_dir, next_dir) = concat::read_directions(&buffer);
                     self.player1.dir = dir;
                     self.player1.last_update_dir = last_update_dir;
                     self.player1.next_dir = next_dir;
+
+                    self.player1.update(&self.food);
+                    self.food.pos = gp;
 
                     // We also have to encode the keypresses of player 2
                     // and send them to the server
@@ -639,6 +646,8 @@ impl event::EventHandler for GameState {
         }
         // If we updated, we set our last update to be now
         self.last_update = Instant::now();
+        self.update_nbr += 1;
+        
         Ok(())
     }
 
